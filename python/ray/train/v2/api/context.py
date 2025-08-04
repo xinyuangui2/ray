@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Any, Dict
 
 from ray.train.v2._internal.execution.context import (
@@ -6,8 +7,9 @@ from ray.train.v2._internal.execution.context import (
 from ray.util.annotations import Deprecated, DeveloperAPI, PublicAPI
 
 
-@PublicAPI(stability="stable")
-class TrainContext:
+class TrainContext(ABC):
+    """Interface for train context implementations."""
+
     @Deprecated
     def get_metadata(self) -> Dict[str, Any]:
         """[Deprecated] User metadata dict passed to the Trainer constructor."""
@@ -54,6 +56,45 @@ class TrainContext:
         raise DeprecationWarning(
             _TUNE_SPECIFIC_CONTEXT_DEPRECATION_MESSAGE.format("get_trial_dir")
         )
+
+    @abstractmethod
+    def get_experiment_name(self) -> str:
+        """Experiment name for the corresponding trial."""
+        pass
+
+    @abstractmethod
+    def get_world_size(self) -> int:
+        """Get the current world size (i.e. total number of workers) for this run."""
+        pass
+
+    @abstractmethod
+    def get_world_rank(self) -> int:
+        """Get the world rank of this worker."""
+        pass
+
+    @abstractmethod
+    def get_local_rank(self) -> int:
+        """Get the local rank of this worker (rank of the worker on its node)."""
+        pass
+
+    @abstractmethod
+    def get_local_world_size(self) -> int:
+        """Get the local world size of this node (i.e. number of workers on this node)."""
+        pass
+
+    @abstractmethod
+    def get_node_rank(self) -> int:
+        """Get the rank of this node."""
+        pass
+
+    @abstractmethod
+    def get_storage(self):
+        """Returns the storage context which gives advanced access to the filesystem and paths."""
+        pass
+
+
+@PublicAPI(stability="stable")
+class DistributedRayTrainContext(TrainContext):
 
     def get_experiment_name(self) -> str:
         """Experiment name for the corresponding trial."""
@@ -210,3 +251,7 @@ class TrainContext:
         without notice between minor versions.
         """
         return get_internal_train_context().get_storage()
+
+
+class LocalRunningTrainContext(TrainContext):
+    def __init__(self):
