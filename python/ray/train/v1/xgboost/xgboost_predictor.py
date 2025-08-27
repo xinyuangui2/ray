@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import pandas as pd
+
 import xgboost
 
 from ray.air.constants import TENSOR_COLUMN_NAME

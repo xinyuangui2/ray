@@ -6,8 +6,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
-import xgboost
 from packaging.version import Version
+
+import xgboost
 from xgboost import RabitTracker
 from xgboost.collective import CommunicatorContext
 

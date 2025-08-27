@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 
+from ray.train.v1.xgboost.config import XGBoostConfig as XGBoostConfigV1
 from ray.train.v2._internal.execution.train_fn_utils import get_train_fn_utils
-from ray.train.xgboost.config import XGBoostConfig as XGBoostConfigV1
 
 
 class XGBoostConfig(XGBoostConfigV1):
