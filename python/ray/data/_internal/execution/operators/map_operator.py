@@ -612,7 +612,7 @@ def _map_task(
     data_context: DataContext,
     ctx: TaskContext,
     *blocks: Block,
-    slices: Optional[List[BlockSlice]] = None,
+    slices: List[Optional[BlockSlice]],
     **kwargs: Dict[str, Any],
 ) -> Iterator[Union[Block, "BlockMetadataWithSchema"]]:
     """Remote function for a single operator task.
@@ -637,10 +637,11 @@ def _map_task(
     TaskContext.set_current(ctx)
     stats = BlockExecStats.builder()
     map_transformer.override_target_max_block_size(ctx.target_max_block_size_override)
-    block_iter: Iterable[Block]
-    if slices:
+    if slices and any(s is not None for s in slices):
+        # Only apply slicing if there are actual non-None slices
         block_iter = _iter_sliced_blocks(blocks, slices)
     else:
+        # No slicing needed, use blocks directly
         block_iter = iter(blocks)
 
     with MemoryProfiler(data_context.memory_usage_poll_interval_s) as profiler:

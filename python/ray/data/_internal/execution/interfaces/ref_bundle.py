@@ -57,7 +57,7 @@ class RefBundle:
 
     # The slices of the blocks in this bundle. This is optional, and may be None
     # if the blocks are not sliced.
-    slices: Optional[List[BlockSlice]] = None
+    slices: Optional[List[Optional[BlockSlice]]] = None
 
     # This attribute is used by the split() operator to assign bundles to logical
     # output splits. It is otherwise None.
@@ -74,10 +74,11 @@ class RefBundle:
     def __post_init__(self):
         if not isinstance(self.blocks, tuple):
             object.__setattr__(self, "blocks", tuple(self.blocks))
-        if self.slices is not None:
-            assert len(self.blocks) == len(
-                self.slices
-            ), "Number of blocks and slices must match"
+        if self.slices is None:
+            object.__setattr__(self, "slices", [None] * len(self.blocks))
+        assert len(self.blocks) == len(
+            self.slices
+        ), "Number of blocks and slices must match"
         for b in self.blocks:
             assert isinstance(b, tuple), b
             assert len(b) == 2, b
@@ -105,30 +106,33 @@ class RefBundle:
 
     def num_rows(self) -> Optional[int]:
         """Number of rows present in this bundle, if known."""
-        slice_total: Optional[int] = None
-        if self.slices is not None:
-            slice_total = sum(block_slice.num_rows for block_slice in self.slices)
-            return slice_total
-
         total = 0
-        for m in self.metadata:
-            if m.num_rows is None:
-                return None
-            total += m.num_rows
+        for (_, metadata), block_slice in zip(self.blocks, self.slices):
+            if block_slice is None:
+                # No slice means use the full block
+                if metadata.num_rows is None:
+                    return None
+                total += metadata.num_rows
+            else:
+                # Use the slice's row count
+                total += block_slice.num_rows
         return total
 
     def size_bytes(self) -> int:
         """Size of the blocks of this bundle in bytes."""
-        if self.slices is not None:
-            total = 0
-            for (_, metadata), block_slice in zip(self.blocks, self.slices):
-                if metadata.num_rows and metadata.num_rows != block_slice.num_rows:
-                    per_row = metadata.size_bytes / metadata.num_rows
-                    total += max(1, int(math.ceil(per_row * block_slice.num_rows)))
-                else:
-                    total += metadata.size_bytes
-            return total
-        return sum(m.size_bytes for m in self.metadata)
+        total = 0
+        for (_, metadata), block_slice in zip(self.blocks, self.slices):
+            if block_slice is None:
+                # No slice means use the full block size
+                total += metadata.size_bytes
+            elif metadata.num_rows and metadata.num_rows != block_slice.num_rows:
+                # Slice is smaller than full block, prorate the size
+                per_row = metadata.size_bytes / metadata.num_rows
+                total += max(1, int(math.ceil(per_row * block_slice.num_rows)))
+            else:
+                # Slice covers the full block
+                total += metadata.size_bytes
+        return total
 
     def destroy_if_owned(self) -> int:
         """Clears the object store memory for these blocks if owned.
@@ -218,7 +222,9 @@ class RefBundle:
         rows_to_take = needed_rows
 
         for (block_ref, metadata), block_slice in zip(self.blocks, block_slices):
-            block_rows = block_slice.num_rows
+            block_rows = (
+                block_slice.num_rows if block_slice is not None else metadata.num_rows
+            )
             if rows_to_take >= block_rows:
                 consumed_blocks.append(
                     (block_ref, _slice_block_metadata(metadata, block_rows))
@@ -230,9 +236,17 @@ class RefBundle:
                     remaining_blocks.append((block_ref, metadata))
                     remaining_slices.append(block_slice)
                     continue
+                last_block_start_offset = (
+                    block_slice.start_offset if block_slice is not None else 0
+                )
+                last_block_end_offset = (
+                    block_slice.end_offset
+                    if block_slice is not None
+                    else metadata.num_rows
+                )
                 consume_slice = BlockSlice(
-                    start_offset=block_slice.start_offset,
-                    end_offset=block_slice.start_offset + rows_to_take,
+                    start_offset=last_block_start_offset,
+                    end_offset=last_block_start_offset + rows_to_take,
                 )
                 consumed_blocks.append(
                     (block_ref, _slice_block_metadata(metadata, rows_to_take))
@@ -243,7 +257,7 @@ class RefBundle:
                 if leftover_rows > 0:
                     remainder_slice = BlockSlice(
                         start_offset=consume_slice.end_offset,
-                        end_offset=block_slice.end_offset,
+                        end_offset=last_block_end_offset,
                     )
                     remaining_blocks.append(
                         (block_ref, _slice_block_metadata(metadata, leftover_rows))
@@ -332,18 +346,19 @@ def _slice_block_metadata(
 
 def _iter_sliced_blocks(
     blocks: Iterable[Block],
-    slices: List[BlockSlice],
+    slices: List[Optional[BlockSlice]],
 ) -> Iterator[Block]:
     blocks_list = list(blocks)
     builder = DelegatingBlockBuilder()
     for block, block_slice in zip(blocks_list, slices):
         accessor = BlockAccessor.for_block(block)
-        start = block_slice.start_offset
-        end = block_slice.end_offset
-
-        if start == 0 and end >= accessor.num_rows():
-            builder.add_block(block)
+        if block_slice is not None:
+            start = block_slice.start_offset
+            end = block_slice.end_offset
         else:
-            builder.add_block(accessor.slice(start, end, copy=False))
+            start = 0
+            end = accessor.num_rows()
+
+        builder.add_block(accessor.slice(start, end, copy=False))
 
     yield builder.build()

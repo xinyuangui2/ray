@@ -139,7 +139,7 @@ def test_slice_ref_bundle_basic():
     assert remaining.num_rows() == 2
 
     assert consumed.slices == [
-        BlockSlice(start_offset=0, end_offset=6),
+        None,  # No slice means use the full block
         BlockSlice(start_offset=0, end_offset=2),
     ]
     assert remaining.slices == [

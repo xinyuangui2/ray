@@ -580,7 +580,7 @@ class _MapWorker:
         data_context: DataContext,
         ctx: TaskContext,
         *blocks: Block,
-        slices: Optional[List[BlockSlice]] = None,
+        slices: List[Optional[BlockSlice]],
         **kwargs: Dict[str, Any],
     ) -> Iterator[Union[Block, List[BlockMetadata]]]:
         yield from _map_task(
