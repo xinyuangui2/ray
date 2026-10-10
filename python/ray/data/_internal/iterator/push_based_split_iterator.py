@@ -393,6 +393,14 @@ class PushBasedDataIterator(DataIterator):
             return
         self._active_epoch = None
         self._coord_actor.notify_split_finished.remote(epoch, self._output_split_idx)
+        # Drop this split's receive state, so blocks still queued (e.g. after
+        # an early break) don't stay pinned in this process. The next epoch
+        # creates a fresh receiver, and late deliveries for a removed key are
+        # dropped. The sentinel wakes a generator blocked on the queue.
+        with _RECEIVER_REGISTRY_LOCK:
+            receiver = _RECEIVER_REGISTRY.pop(self._receiver_key(), None)
+        if receiver is not None:
+            receiver.queue.put(_EndOfEpoch(epoch))
 
     def stats(self) -> str:
         stats = cast(DatasetStats, ray.get(self._coord_actor.stats.remote()))

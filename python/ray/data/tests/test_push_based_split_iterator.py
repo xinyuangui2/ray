@@ -157,6 +157,13 @@ class _Consumer(PushSplitReceiverMixin):
             raise result
         return result
 
+    def num_receivers(self) -> int:
+        # Imported here so this reads the worker process's registry; a
+        # module-level name would be pickled by value with this class.
+        from ray.data._internal.iterator import push_based_split_iterator
+
+        return len(push_based_split_iterator._RECEIVER_REGISTRY)
+
 
 def _make_consumers(iterators) -> List[Any]:
     # pyrefly: ignore[missing-attribute]  # @ray.remote hides ActorClass.remote
@@ -199,9 +206,13 @@ def test_push_split_early_exit_then_full_epoch(ray_start_regular_shared):
     assert results[0]["rows"] == 200
     assert results[1]["rows"] == 500
 
+    # Receive state is dropped when iteration ends, even after an early exit.
+    assert ray.get([c.num_receivers.remote() for c in consumers]) == [0, 0]
+
     # The next epoch recovers and serves full shares.
     results = _run_epochs(consumers)
     assert [r["rows"] for r in results] == [500, 500]
+    assert ray.get([c.num_receivers.remote() for c in consumers]) == [0, 0]
 
 
 def test_push_split_error_propagation(ray_start_regular_shared):
