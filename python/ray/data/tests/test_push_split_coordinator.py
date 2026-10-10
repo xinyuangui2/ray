@@ -55,6 +55,10 @@ def test_flow_finish_clears_contribution():
     assert flow.rows_to_send() == 0
     assert flow.in_flight_bytes() == 0
 
+    # Neither does a push recorded by a sender that was mid-fetch.
+    flow.record_push(num_rows=50, size_bytes=500)
+    assert flow.in_flight_bytes() == 0
+
 
 def test_flow_wait_for_room_wakes_on_report():
     flow = _SplitFlow()
