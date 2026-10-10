@@ -336,9 +336,15 @@ class PushSplitCoordinator:
         }
 
     def shutdown_executor(self):
+        # Stop the pushers first, so ones woken by the shutdown exit instead
+        # of sending end-of-epoch or errors to consumers that may be gone.
         with self._lock:
-            if self._current_executor is not None:
-                self._current_executor.shutdown(force=False)
+            stop_events = list(self._pusher_stop_events.values())
+            executor = self._current_executor
+        for event in stop_events:
+            event.set()
+        if executor is not None:
+            executor.shutdown(force=False)
 
     def _check_split_idx(self, split_idx: int) -> None:
         if not 0 <= split_idx < self._n:
@@ -554,6 +560,10 @@ class PushSplitCoordinator:
                 t0 = time.monotonic()
                 bundle = output_iterator.get_next(split_idx)
                 flow.wait_output_s += time.monotonic() - t0
+                if stop.is_set():
+                    # The consumer finished while this thread was waiting
+                    # on the executor; don't send it more data.
+                    return
                 for entry in bundle.blocks:
                     size_bytes = entry.metadata.size_bytes or 0
                     num_rows = entry.metadata.num_rows

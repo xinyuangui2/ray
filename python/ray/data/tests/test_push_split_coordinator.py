@@ -195,6 +195,21 @@ def test_request_rows_only_updates_current_epoch(ray_start_regular_shared):
     assert state["rows_consumed"] == {0: 0, 1: 0}
 
 
+def test_shutdown_executor_stops_pushers(ray_start_regular_shared):
+    coordinator = _make_coordinator()
+    ray.get([coordinator.start_epoch.remote(i) for i in range(2)])
+
+    def _num_live_pushers(self) -> int:
+        return sum(t.is_alive() for t in self._pusher_threads)
+
+    assert _get(coordinator.__ray_call__.remote(_num_live_pushers)) == 2
+
+    _get(coordinator.shutdown_executor.remote())
+    wait_for_condition(
+        lambda: _get(coordinator.__ray_call__.remote(_num_live_pushers)) == 0
+    )
+
+
 def test_executor_shuts_down_after_all_splits_finish(ray_start_regular_shared):
     coordinator = _make_coordinator()
     ray.get([coordinator.start_epoch.remote(i) for i in range(2)])
