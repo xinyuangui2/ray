@@ -3,6 +3,7 @@
 import threading
 import time
 from typing import Any, List, Optional
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -257,6 +258,14 @@ def test_push_split_materialize_not_supported(ray_start_regular_shared):
     iterators = streaming_split_push_based(ds, 1)
     with pytest.raises(NotImplementedError, match="iter_batches"):
         iterators[0].materialize()
+
+
+def test_push_split_checkpointing_not_supported(ray_start_regular_shared):
+    ds = ray.data.range(100)
+    iterators = streaming_split_push_based(ds, 1)
+    iterators[0]._enable_checkpointing(MagicMock())
+    with pytest.raises(NotImplementedError, match="checkpointing"):
+        next(iter(iterators[0].iter_batches(batch_size=10)))
 
 
 def test_push_split_requires_actor_host(ray_start_regular_shared):

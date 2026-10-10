@@ -12,12 +12,10 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
     Iterator,
     List,
     Optional,
-    Tuple,
     Union,
     cast,
 )
@@ -36,11 +34,11 @@ from ray.data._internal.stats import DatasetStats
 from ray.data._internal.util import create_streaming_split_dataset
 from ray.data.block import Block
 from ray.data.context import DataContext
-from ray.data.iterator import DataIterator
+from ray.data.iterator import DataIterator, _BatchSource
 
 if TYPE_CHECKING:
     from ray.data._internal.execution.interfaces import NodeIdStr
-    from ray.data.dataset import Dataset, MaterializedDataset, Schema
+    from ray.data.dataset import Dataset, Schema
 
 logger = logging.getLogger(__name__)
 
@@ -193,8 +191,11 @@ class _MaterializedBatchIterator(BatchIterator):
     """BatchIterator over already-materialized blocks: skips the ref-level
     prefetch/resolve stages, inherits everything else unchanged."""
 
-    # ``ref_bundles`` is an Iterator[ResolvedBlock] here (see
-    # PushBasedDataIterator._to_ref_bundle_iterator).
+    def __init__(self, blocks: Iterator[ResolvedBlock], **kwargs):
+        # BatchIterator stores its input and hands it to _pipeline, which
+        # this class overrides to consume blocks instead of RefBundles.
+        super().__init__(cast(Any, blocks), **kwargs)
+
     def _pipeline(self, ref_bundles: Iterator[Any]):
         batch_iter = self._blocks_to_batches(ref_bundles)
         batch_iter = self._format_batches(batch_iter)
@@ -247,115 +248,24 @@ class PushBasedDataIterator(DataIterator):
         # Epoch this split is currently consuming. Written by the consuming
         # thread; a stale generator uses it to detect that its epoch ended.
         self._active_epoch: Optional[int] = None
-        # Prefetch window, refreshed by _create_batch_iterator from the
-        # user's iter_batches() arguments.
+        # Prefetch window, refreshed by _create_batch_source from the user's
+        # iter_batches() arguments.
         self._prefetch_batches = 1
         self._prefetch_batch_size: Optional[int] = None
 
     def _receiver_key(self) -> str:
         return f"{self._coord_actor._actor_id.hex()}:{self._output_split_idx}"
 
-    def _to_ref_bundle_iterator(  # pyrefly: ignore[bad-override]
-        self,
-    ) -> Tuple[Iterator[ResolvedBlock], Optional[DatasetStats], None]:
-        # Deviates from the base contract on purpose: yields ResolvedBlock
-        # instead of RefBundle (blocks arrive materialized). Both base-class
-        # callers are overridden to match: _create_batch_iterator consumes
-        # the blocks, and materialize() isn't supported.
-        def gen_blocks() -> Iterator[ResolvedBlock]:
-            try:
-                self_handle = ray.get_runtime_context().current_actor
-                assert self_handle is not None
-            except Exception as e:
-                raise RuntimeError(
-                    "PushBasedDataIterator must be iterated from inside a Ray "
-                    "actor whose class mixes in PushSplitReceiverMixin (e.g. "
-                    "a Ray Train worker): the coordinator pushes blocks to "
-                    "the hosting actor's receiver methods."
-                ) from e
+    def _to_ref_bundle_iterator(self):
+        # Blocks arrive by value, so there are no RefBundles to return;
+        # iter_batches goes through _create_batch_source instead.
+        raise NotImplementedError(
+            "Push-based streaming splits receive blocks by value and don't "
+            "support RefBundle-based APIs such as materialize(). Iterate the "
+            "split with iter_batches() instead."
+        )
 
-            key = self._receiver_key()
-            with _RECEIVER_REGISTRY_LOCK:
-                receiver = _RECEIVER_REGISTRY.get(key)
-                if receiver is None:
-                    receiver = _PushReceiver()
-                    _RECEIVER_REGISTRY[key] = receiver
-            # Reset receiver state before the barrier; re-registering every
-            # epoch is fine (idempotent overwrite).
-            receiver.reset()
-            ray.get(
-                self._coord_actor.register.remote(
-                    self._output_split_idx, self_handle, key=key
-                )
-            )
-            epoch = cast(
-                int,
-                ray.get(self._coord_actor.start_epoch.remote(self._output_split_idx)),
-            )
-            self._active_epoch = epoch
-            receiver.begin_epoch(epoch)
-
-            # Prefetch window, in rows: declare a `prefetch_batches *
-            # batch_size` row window and report consumption; the coordinator
-            # computes what to send (target_rows - (rows_pushed -
-            # rows_consumed)) and pushes whole blocks while that is
-            # positive, so any positive window yields at least one block.
-            # Blocks pushed but not yet consumed sit in the local receiver
-            # queue — that queue IS the prefetch buffer. Without a batch
-            # size the window degenerates to one block in flight.
-            if self._prefetch_batches > 0 and self._prefetch_batch_size:
-                target_rows = self._prefetch_batches * self._prefetch_batch_size
-            else:
-                target_rows = 1
-
-            def report(consumed_rows: int, consumed_bytes: int) -> None:
-                # One RPC per consumed block. Rows are reported at pop (they
-                # drive the window); bytes are reported one block late so
-                # the block currently being batched still counts as
-                # consumer-held for producer pacing.
-                self._coord_actor.request_rows.remote(
-                    self._output_split_idx,
-                    epoch,
-                    target_rows,
-                    consumed_rows,
-                    consumed_bytes,
-                )
-
-            pending_consumed_bytes = 0
-            report(0, 0)
-            # reset() gave this epoch a fresh queue, so a lingering
-            # generator from an early-exited epoch can't steal deliveries;
-            # the loop condition below reaps such generators.
-            epoch_queue = receiver.queue
-
-            while self._active_epoch == epoch:
-                try:
-                    # Queue-wait time lands in the get_ref_bundles iterator
-                    # stat: the push analog of waiting on the coordinator.
-                    with self._iter_stats.iter_get_ref_bundles_s.timer():
-                        item = epoch_queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-                if isinstance(item, _EndOfEpoch):
-                    logger.debug(
-                        f"Split {self._output_split_idx}: epoch {epoch} exhausted."
-                    )
-                    return
-                if isinstance(item, _ExecutorError):
-                    raise item.error
-                assert isinstance(item, _BlockDelivery)
-                report(item.num_rows, pending_consumed_bytes)
-                pending_consumed_bytes = item.size_bytes
-                yield ResolvedBlock(block=item.block)
-
-        return gen_blocks(), self._iter_stats, None
-
-    def _create_batch_iterator(
-        self,
-        ref_bundles_iter: Iterator[Any],
-        prefetch_bytes_callback: Optional[Callable[[int], None]] = None,
-        **kwargs,
-    ) -> BatchIterator:
+    def _create_batch_source(self, **batch_iterator_kwargs) -> _BatchSource:
         # Runs on the thread consuming batches (the block generator itself is
         # pulled from a helper thread). A default actor runs its tasks on the
         # main thread; blocking it would starve the delivery tasks and hang.
@@ -369,14 +279,111 @@ class PushBasedDataIterator(DataIterator):
                 "from a background thread (as Ray Train does) or give the "
                 "actor max_concurrency > 1."
             )
-        # Capture the prefetch window before iteration starts; gen_blocks
+        if self._checkpointer is not None:
+            raise NotImplementedError(
+                "Data checkpointing isn't supported for push-based streaming "
+                "splits yet."
+            )
+        # Capture the prefetch window before iteration starts; _iter_blocks
         # reads it lazily on its first next().
-        self._prefetch_batches = kwargs.get("prefetch_batches", 1)
-        self._prefetch_batch_size = kwargs.get("batch_size")
-        # The iterator yields ResolvedBlocks (see _to_ref_bundle_iterator).
-        return _MaterializedBatchIterator(
-            ref_bundles_iter, prefetch_bytes_callback=prefetch_bytes_callback, **kwargs
+        self._prefetch_batches = batch_iterator_kwargs.get("prefetch_batches", 1)
+        self._prefetch_batch_size = batch_iterator_kwargs.get("batch_size")
+        dataset_tags = self._get_dataset_tag()
+        batch_iterator = _MaterializedBatchIterator(
+            self._iter_blocks(),
+            stats=self._iter_stats,
+            dataset_tags=dataset_tags,
+            **batch_iterator_kwargs,
         )
+        return _BatchSource(batch_iterator, self._iter_stats, None, dataset_tags)
+
+    def _iter_blocks(self) -> Iterator[ResolvedBlock]:
+        """Register with the coordinator, start the epoch, and yield the
+        blocks pushed to this split."""
+        try:
+            self_handle = ray.get_runtime_context().current_actor
+            assert self_handle is not None
+        except Exception as e:
+            raise RuntimeError(
+                "PushBasedDataIterator must be iterated from inside a Ray "
+                "actor whose class mixes in PushSplitReceiverMixin (e.g. "
+                "a Ray Train worker): the coordinator pushes blocks to "
+                "the hosting actor's receiver methods."
+            ) from e
+
+        key = self._receiver_key()
+        with _RECEIVER_REGISTRY_LOCK:
+            receiver = _RECEIVER_REGISTRY.get(key)
+            if receiver is None:
+                receiver = _PushReceiver()
+                _RECEIVER_REGISTRY[key] = receiver
+        # Reset receiver state before the barrier; re-registering every
+        # epoch is fine (idempotent overwrite).
+        receiver.reset()
+        ray.get(
+            self._coord_actor.register.remote(
+                self._output_split_idx, self_handle, key=key
+            )
+        )
+        epoch = cast(
+            int,
+            ray.get(self._coord_actor.start_epoch.remote(self._output_split_idx)),
+        )
+        self._active_epoch = epoch
+        receiver.begin_epoch(epoch)
+
+        # Prefetch window, in rows: declare a `prefetch_batches *
+        # batch_size` row window and report consumption; the coordinator
+        # computes what to send (target_rows - (rows_pushed -
+        # rows_consumed)) and pushes whole blocks while that is
+        # positive, so any positive window yields at least one block.
+        # Blocks pushed but not yet consumed sit in the local receiver
+        # queue — that queue IS the prefetch buffer. Without a batch
+        # size the window degenerates to one block in flight.
+        if self._prefetch_batches > 0 and self._prefetch_batch_size:
+            target_rows = self._prefetch_batches * self._prefetch_batch_size
+        else:
+            target_rows = 1
+
+        def report(consumed_rows: int, consumed_bytes: int) -> None:
+            # One RPC per consumed block. Rows are reported at pop (they
+            # drive the window); bytes are reported one block late so
+            # the block currently being batched still counts as
+            # consumer-held for producer pacing.
+            self._coord_actor.request_rows.remote(
+                self._output_split_idx,
+                epoch,
+                target_rows,
+                consumed_rows,
+                consumed_bytes,
+            )
+
+        pending_consumed_bytes = 0
+        report(0, 0)
+        # reset() gave this epoch a fresh queue, so a lingering
+        # generator from an early-exited epoch can't steal deliveries;
+        # the loop condition below reaps such generators.
+        epoch_queue = receiver.queue
+
+        while self._active_epoch == epoch:
+            try:
+                # Queue-wait time lands in the get_ref_bundles iterator
+                # stat: the push analog of waiting on the coordinator.
+                with self._iter_stats.iter_get_ref_bundles_s.timer():
+                    item = epoch_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if isinstance(item, _EndOfEpoch):
+                logger.debug(
+                    f"Split {self._output_split_idx}: epoch {epoch} exhausted."
+                )
+                return
+            if isinstance(item, _ExecutorError):
+                raise item.error
+            assert isinstance(item, _BlockDelivery)
+            report(item.num_rows, pending_consumed_bytes)
+            pending_consumed_bytes = item.size_bytes
+            yield ResolvedBlock(block=item.block)
 
     def _on_iteration_end(self, executor) -> None:
         """Notify the coordinator on any end of iteration (exhaustion, early
@@ -406,15 +413,6 @@ class PushBasedDataIterator(DataIterator):
 
     def world_size(self) -> int:
         return self._world_size
-
-    def materialize(self) -> "MaterializedDataset":
-        # The base implementation builds a dataset from the RefBundles of
-        # _to_ref_bundle_iterator, but this iterator yields materialized
-        # blocks instead.
-        raise NotImplementedError(
-            "materialize() isn't supported for push-based streaming splits yet. "
-            "Iterate the split with iter_batches() instead."
-        )
 
     def _get_dataset_tag(self) -> Dict[str, Optional[str]]:
         return cast(
