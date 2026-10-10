@@ -111,6 +111,10 @@ class _SplitFlow:
 
     def record_push(self, num_rows: int, size_bytes: int) -> None:
         with self.cond:
+            # A sender that was mid-fetch when the split finished must not
+            # add bytes no consumer will read back.
+            if self.finished:
+                return
             self.rows_pushed += num_rows
             self.bytes_pushed += size_bytes
 
