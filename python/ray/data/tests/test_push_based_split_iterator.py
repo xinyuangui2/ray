@@ -252,6 +252,13 @@ def test_push_split_flow_control_bounds_buffering(ray_start_regular_shared):
     _run_epochs(consumers)
 
 
+def test_push_split_materialize_not_supported(ray_start_regular_shared):
+    ds = ray.data.range(100)
+    iterators = streaming_split_push_based(ds, 1)
+    with pytest.raises(NotImplementedError, match="iter_batches"):
+        iterators[0].materialize()
+
+
 def test_push_split_requires_actor_host(ray_start_regular_shared):
     ds = ray.data.range(100)
     iterators = streaming_split_push_based(ds, 1)

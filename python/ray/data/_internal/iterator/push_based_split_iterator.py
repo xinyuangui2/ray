@@ -40,7 +40,7 @@ from ray.data.iterator import DataIterator
 
 if TYPE_CHECKING:
     from ray.data._internal.execution.interfaces import NodeIdStr
-    from ray.data.dataset import Dataset, Schema
+    from ray.data.dataset import Dataset, MaterializedDataset, Schema
 
 logger = logging.getLogger(__name__)
 
@@ -259,8 +259,9 @@ class PushBasedDataIterator(DataIterator):
         self,
     ) -> Tuple[Iterator[ResolvedBlock], Optional[DatasetStats], None]:
         # Deviates from the base contract on purpose: yields ResolvedBlock
-        # instead of RefBundle (blocks arrive materialized); the paired
-        # _create_batch_iterator override consumes them.
+        # instead of RefBundle (blocks arrive materialized). Both base-class
+        # callers are overridden to match: _create_batch_iterator consumes
+        # the blocks, and materialize() isn't supported.
         def gen_blocks() -> Iterator[ResolvedBlock]:
             try:
                 self_handle = ray.get_runtime_context().current_actor
@@ -405,6 +406,15 @@ class PushBasedDataIterator(DataIterator):
 
     def world_size(self) -> int:
         return self._world_size
+
+    def materialize(self) -> "MaterializedDataset":
+        # The base implementation builds a dataset from the RefBundles of
+        # _to_ref_bundle_iterator, but this iterator yields materialized
+        # blocks instead.
+        raise NotImplementedError(
+            "materialize() isn't supported for push-based streaming splits yet. "
+            "Iterate the split with iter_batches() instead."
+        )
 
     def _get_dataset_tag(self) -> Dict[str, Optional[str]]:
         return cast(
