@@ -6,6 +6,7 @@ overview of the design.
 """
 
 import logging
+import os
 import queue
 import threading
 from dataclasses import dataclass
@@ -381,8 +382,12 @@ class PushBasedDataIterator(DataIterator):
             if isinstance(item, _ExecutorError):
                 raise item.error
             assert isinstance(item, _BlockDelivery)
-            report(item.num_rows, pending_consumed_bytes)
-            pending_consumed_bytes = item.size_bytes
+            # EXPERIMENT: report bytes at pop (no one-block lag).
+            if os.environ.get("PUSH_SPLIT_NO_LAG") == "1":
+                report(item.num_rows, item.size_bytes)
+            else:
+                report(item.num_rows, pending_consumed_bytes)
+                pending_consumed_bytes = item.size_bytes
             yield ResolvedBlock(block=item.block)
 
     def _on_iteration_end(self, executor) -> None:

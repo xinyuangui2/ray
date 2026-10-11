@@ -51,6 +51,7 @@ consumer replacement.
 
 import collections
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -211,6 +212,15 @@ class PushSplitCoordinator:
 
     def __init__(self, dataset: "Dataset", n: int):
         self._data_context = dataset.context.copy()
+        # EXPERIMENT: push-only DownstreamCapacity threshold.
+        if os.environ.get("PUSH_SPLIT_DC_RATIO"):
+            self._data_context.downstream_capacity_backpressure_ratio = float(
+                os.environ["PUSH_SPLIT_DC_RATIO"]
+            )
+            logger.warning(
+                "EXPERIMENT PUSH_SPLIT_DC_RATIO="
+                f"{self._data_context.downstream_capacity_backpressure_ratio}"
+            )
         ray.data.DataContext._set_current(self._data_context)
 
         self._base_dataset = dataset
@@ -670,6 +680,8 @@ class PushSplitCoordinator:
             return
         with self._pacing_lock:
             total = sum(flow.in_flight_bytes() for flow in self._flows.values())
+            # EXPERIMENT: scale the reported consumer capacity.
+            total = int(total * float(os.environ.get("PUSH_SPLIT_EXT_SCALE", "1.0")))
             try:
                 executor.set_external_consumer_bytes(total)
             except Exception:
