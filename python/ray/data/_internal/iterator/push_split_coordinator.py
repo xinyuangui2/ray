@@ -309,6 +309,9 @@ class PushSplitCoordinator:
             # lands on the old epoch's discarded state.
             if epoch_id == self._cur_epoch:
                 flow.report(target_rows, consumed_rows, consumed_bytes)
+        # EXPERIMENT: refresh the pacing feed on every consumer report (like
+        # SplitCoordinator.get), not only after sends.
+        self._update_external_consumer_bytes()
         self._coordinator_overhead_s += time.perf_counter() - start_time
 
     def notify_split_finished(self, epoch_id: int, split_idx: int) -> None:
